@@ -1,0 +1,17 @@
+[
+	{
+		"doctype": "Custom Field",
+		"dt": "Sales Invoice",
+		"fieldname": "fac_com",
+		"fieldtype": "Data",
+		"label": "Fac. Excel",
+		"module": "Facture Excel",
+		"name": "Sales Invoice-fac_com",
+		"read_only": 1,
+		"allow_on_submit": 1,
+		"in_list_view": 1,
+		"insert_after": "status",
+		"print_hide": 1,
+		"bold": 0
+	}
+]
