@@ -72,29 +72,49 @@ function _update_diff(frm, total) {
 
 function _show_import_dialog(frm) {
 	const d = new frappe.ui.Dialog({
-		title: __("Importer des articles depuis Excel"),
+		title: __("Importer des articles"),
 		fields: [
 			{
 				fieldtype: "HTML",
-				fieldname: "description_html",
-				options: `<div style="margin-bottom:12px;color:#555;line-height:1.6;">
-					Importez vos articles depuis un fichier <b>.xlsx</b>.<br>
-					Les colonnes doivent contenir : <b>Désignation</b>, <b>Quantité</b> et <b>Prix Unitaire</b>
-					(noms flexibles acceptés).<br>
-					<span style="color:#e74c3c;">⚠ L'import remplace tous les articles existants.</span>
+				fieldname: "excel_section",
+				options: `<div style="margin-bottom:16px;">
+					<b style="font-size:12px;">📄 Depuis un fichier Excel (.xlsx)</b>
+					<div style="color:#555;line-height:1.6;margin-top:4px;">
+						Les colonnes doivent contenir : <b>Désignation</b>, <b>Quantité</b> et <b>Prix Unitaire</b>.<br>
+						<span style="color:#e74c3c;">⚠ L'import Excel remplace tous les articles existants.</span>
+					</div>
+				</div>`,
+			},
+			{
+				fieldtype: "HTML",
+				fieldname: "pdf_section",
+				options: `<div style="margin-bottom:8px;border-top:1px solid #eee;padding-top:14px;">
+					<b style="font-size:12px;">📦 Depuis un ou plusieurs Bons de Livraison (PDF)</b>
+					<div style="color:#555;line-height:1.6;margin-top:4px;">
+						Les articles sont <b>fusionnés</b> avec ceux déjà présents.<br>
+						Les doublons sont détectés par code article : quantités sommées, prix pondéré calculé.
+					</div>
 				</div>`,
 			},
 		],
-		primary_action_label: __("Importer un fichier"),
+		primary_action_label: __("Importer Excel"),
 		primary_action() {
 			d.hide();
 			_pick_and_import(frm);
 		},
-		secondary_action_label: __("Télécharger le modèle"),
+		secondary_action_label: __("Importer BL PDF"),
 		secondary_action() {
-			_download_template();
+			d.hide();
+			_pick_and_import_pdf(frm);
 		},
 	});
+	// Ajouter bouton modèle manuellement
+	d.$wrapper.find(".modal-footer").prepend(
+		`<button class="btn btn-default btn-sm" id="btn-dl-modele" style="margin-right:auto;">
+			Télécharger le modèle Excel
+		</button>`
+	);
+	d.$wrapper.find("#btn-dl-modele").on("click", () => _download_template());
 	d.show();
 }
 
@@ -127,6 +147,110 @@ function _pick_and_import(frm) {
 		reader.readAsDataURL(file);
 	};
 	input.click();
+}
+
+function _pick_and_import_pdf(frm) {
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = ".pdf";
+	input.multiple = true;
+	input.onchange = function () {
+		const files = Array.from(input.files);
+		if (!files.length) return;
+
+		const invalid = files.filter(f => !f.name.toLowerCase().endsWith(".pdf"));
+		if (invalid.length) {
+			frappe.msgprint({ message: __("Seuls les fichiers .pdf sont acceptés."), indicator: "red" });
+			return;
+		}
+
+		// Lire tous les fichiers en base64
+		const readers = files.map(file => new Promise(resolve => {
+			const reader = new FileReader();
+			reader.onload = e => resolve({
+				file_name: file.name,
+				file_data: e.target.result.split(",")[1],
+			});
+			reader.readAsDataURL(file);
+		}));
+
+		Promise.all(readers).then(files_data => {
+			frappe.call({
+				method: "facture_excel.facture_excel.doctype.facture_excel.facture_excel.import_pdf_bl",
+				args: { files_data: JSON.stringify(files_data) },
+				freeze: true,
+				freeze_message: __("Extraction des BL en cours…"),
+				callback(r) {
+					if (!r.exc && r.message) {
+						_apply_import_pdf(frm, r.message);
+					}
+				},
+			});
+		});
+	};
+	input.click();
+}
+
+function _apply_import_pdf(frm, result) {
+	// Fusionner avec les articles existants (par description normalisée)
+	const normalize = s => s.toLowerCase().trim().replace(/\s+/g, " ");
+
+	// Index des articles existants par description normalisée
+	const existing = {};
+	(frm.doc.items || []).forEach(row => {
+		const key = normalize(row.description || "");
+		if (key) existing[key] = row;
+	});
+
+	let added = 0, merged_count = 0;
+
+	result.items.forEach(item => {
+		const key = normalize(item.description);
+		if (existing[key]) {
+			// Fusion : prix pondéré + somme quantités
+			const row = existing[key];
+			const old_qty  = flt(row.qty);
+			const old_rate = flt(row.rate);
+			const new_qty  = flt(item.qty);
+			const new_rate = flt(item.rate);
+			const total_qty = old_qty + new_qty;
+			const new_rate_pond = total_qty > 0
+				? Math.round(((old_qty * old_rate) + (new_qty * new_rate)) / total_qty * 100) / 100
+				: new_rate;
+			frappe.model.set_value(row.doctype, row.name, "qty", total_qty);
+			frappe.model.set_value(row.doctype, row.name, "rate", new_rate_pond);
+			frappe.model.set_value(row.doctype, row.name, "amount", Math.round(total_qty * new_rate_pond * 100) / 100);
+			merged_count++;
+		} else {
+			// Nouvel article
+			const row = frm.add_child("items");
+			row.description = item.description;
+			row.qty         = item.qty;
+			row.rate        = item.rate;
+			row.amount      = item.amount;
+			existing[key]   = row;
+			added++;
+		}
+	});
+
+	frm.refresh_field("items");
+	_calc_total(frm);
+
+	// Résumé
+	let msg = `<b>${result.files}</b> BL traité(s) — <b>${result.imported}</b> article(s) extrait(s).<br>`;
+	msg += `<b>${added}</b> ajouté(s), <b>${merged_count}</b> fusionné(s) avec articles existants.`;
+	if (result.skipped && result.skipped.length > 0) {
+		msg += `<br><br><b>${result.skipped.length}</b> problème(s) :<ul>`;
+		result.skipped.forEach(s => {
+			msg += `<li>${s.file ? s.file + " : " : ""}${s.reason}</li>`;
+		});
+		msg += "</ul>";
+	}
+	frappe.msgprint({
+		title: __("Résultat de l'import BL"),
+		message: msg,
+		indicator: result.skipped && result.skipped.length > 0 ? "orange" : "green",
+	});
 }
 
 function _apply_import(frm, result) {

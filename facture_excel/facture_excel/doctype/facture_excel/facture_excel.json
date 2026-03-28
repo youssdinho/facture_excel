@@ -25,8 +25,7 @@
    "label": "Facture ERPNext",
    "options": "Sales Invoice",
    "reqd": 1,
-   "search_index": 1,
-   "unique": 1
+   "search_index": 1
   },
   {
    "fetch_from": "sales_invoice.customer",

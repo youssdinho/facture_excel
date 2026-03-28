@@ -79,6 +79,127 @@ def _refresh_fac_com(si_name):
 	)
 
 
+@frappe.whitelist()
+def import_pdf_bl(files_data):
+	"""Parse un ou plusieurs BL PDF et retourne les articles fusionnés.
+	files_data : liste JSON de {file_name, file_data (base64)}
+	Déduplication par Réf (code article) pendant le traitement.
+	"""
+	import json
+	import pdfplumber
+
+	if isinstance(files_data, str):
+		files_data = json.loads(files_data)
+
+	# ref -> {description, qty, weighted_sum (qty*rate), skipped}
+	merged = {}
+	skipped = []
+	total_files = len(files_data)
+
+	for file_obj in files_data:
+		file_name = file_obj.get("file_name", "")
+		if not file_name.lower().endswith(".pdf"):
+			skipped.append({"file": file_name, "reason": "pas un fichier PDF"})
+			continue
+
+		try:
+			raw = base64.b64decode(file_obj["file_data"])
+		except Exception:
+			skipped.append({"file": file_name, "reason": "impossible de décoder le fichier"})
+			continue
+
+		try:
+			with pdfplumber.open(io.BytesIO(raw)) as pdf:
+				for page in pdf.pages:
+					tables = page.extract_tables()
+					for table in tables:
+						_parse_bl_table(table, merged, skipped, file_name)
+		except Exception as e:
+			skipped.append({"file": file_name, "reason": f"erreur lecture PDF : {e}"})
+
+	# Construire la liste finale
+	items = []
+	for ref, data in merged.items():
+		qty = data["qty"]
+		rate = round(data["weighted_sum"] / qty, 2) if qty else 0
+		items.append({
+			"description": data["description"],
+			"qty": qty,
+			"rate": rate,
+			"amount": round(qty * rate, 2),
+		})
+
+	return {
+		"items": items,
+		"imported": len(items),
+		"files": total_files,
+		"skipped": skipped,
+	}
+
+
+def _parse_bl_table(table, merged, skipped, file_name):
+	"""Extrait les lignes articles d'un tableau pdfplumber et les fusionne dans merged."""
+	if not table or len(table) < 2:
+		return
+
+	# Détecter les indices de colonnes depuis l'en-tête
+	header = [str(c).strip().lower().replace("\n", " ") if c else "" for c in table[0]]
+
+	idx_ref  = _find_col(header, {"réf", "ref", "référence", "code"})
+	idx_desc = _find_col(header, {"description", "désignation", "libellé", "article"})
+	idx_qty  = _find_col(header, {"qté", "qty", "quantité", "qte"})
+	idx_pu   = _find_col(header, {"pu\nttc", "pu ttc", "pu", "prix unitaire", "prix unit.", "p.u ttc"})
+
+	if any(i is None for i in [idx_ref, idx_desc, idx_qty, idx_pu]):
+		skipped.append({"file": file_name, "reason": f"colonnes introuvables : {header}"})
+		return
+
+	for row in table[1:]:
+		if not row or len(row) <= max(idx_ref, idx_desc, idx_qty, idx_pu):
+			continue
+
+		ref  = str(row[idx_ref] or "").strip()
+		desc = str(row[idx_desc] or "").strip().replace("\n", " ")
+		qty_raw = str(row[idx_qty] or "").strip()
+		pu_raw  = str(row[idx_pu]  or "").strip()
+
+		# Ignorer lignes vides ou totaux
+		if not ref or not desc or ref.lower() in ("réf", "ref", "total", ""):
+			continue
+		# Ignorer si ref non numérique (ligne de total, etc.)
+		if not any(c.isdigit() for c in ref):
+			continue
+
+		try:
+			qty = float(qty_raw.replace(" ", "").replace(",", "."))
+			pu  = float(pu_raw.replace(" ", "").replace(",", "."))
+		except ValueError:
+			skipped.append({"file": file_name, "reason": f"ligne {ref} : quantité ou prix non numérique"})
+			continue
+
+		if qty <= 0 or pu < 0:
+			continue
+
+		if ref in merged:
+			# Fusion : somme qty + prix pondéré
+			merged[ref]["weighted_sum"] += qty * pu
+			merged[ref]["qty"] += qty
+		else:
+			merged[ref] = {
+				"description": desc,
+				"qty": qty,
+				"weighted_sum": qty * pu,
+			}
+
+
+def _find_col(header, aliases):
+	"""Retourne l'index de la première colonne dont le nom est dans aliases."""
+	for i, h in enumerate(header):
+		if h in aliases:
+			return i
+	return None
+
+
 def _normalize(text):
 	"""Lowercase + strip accents for flexible column matching."""
 	if not text:
