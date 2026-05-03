@@ -192,48 +192,46 @@ function _pick_and_import_pdf(frm) {
 }
 
 function _apply_import_pdf(frm, result) {
-	// Supprimer les lignes vides (ligne vide par défaut de Frappe)
-	frm.doc.items = (frm.doc.items || []).filter(r => (r.description || "").trim());
-
-	// Fusionner avec les articles existants (par description normalisée)
 	const normalize = s => s.toLowerCase().trim().replace(/\s+/g, " ");
 
-	// Index des articles existants par description normalisée
-	const existing = {};
+	// Snapshot des articles existants non-vides avant de vider le tableau
+	const snapshot = {};
 	(frm.doc.items || []).forEach(row => {
 		const key = normalize(row.description || "");
-		if (key) existing[key] = row;
+		if (key) snapshot[key] = { description: row.description, qty: flt(row.qty), rate: flt(row.rate), amount: flt(row.amount) };
 	});
 
-	let added = 0, merged_count = 0;
+	// Vider complètement le tableau (purge l'état interne Frappe + la ligne vide par défaut)
+	frm.clear_table("items");
 
+	// Fusionner les articles du PDF dans le snapshot
+	let added = 0, merged_count = 0;
 	result.items.forEach(item => {
 		const key = normalize(item.description);
-		if (existing[key]) {
-			// Fusion : prix pondéré + somme quantités
-			const row = existing[key];
-			const old_qty  = flt(row.qty);
-			const old_rate = flt(row.rate);
+		if (snapshot[key]) {
+			const old_qty  = snapshot[key].qty;
+			const old_rate = snapshot[key].rate;
 			const new_qty  = flt(item.qty);
 			const new_rate = flt(item.rate);
 			const total_qty = old_qty + new_qty;
 			const new_rate_pond = total_qty > 0
 				? Math.round(((old_qty * old_rate) + (new_qty * new_rate)) / total_qty * 100) / 100
 				: new_rate;
-			frappe.model.set_value(row.doctype, row.name, "qty", total_qty);
-			frappe.model.set_value(row.doctype, row.name, "rate", new_rate_pond);
-			frappe.model.set_value(row.doctype, row.name, "amount", Math.round(total_qty * new_rate_pond * 100) / 100);
+			snapshot[key] = { description: snapshot[key].description, qty: total_qty, rate: new_rate_pond, amount: Math.round(total_qty * new_rate_pond * 100) / 100 };
 			merged_count++;
 		} else {
-			// Nouvel article
-			const row = frm.add_child("items");
-			row.description = item.description;
-			row.qty         = item.qty;
-			row.rate        = item.rate;
-			row.amount      = item.amount;
-			existing[key]   = row;
+			snapshot[key] = { description: item.description, qty: flt(item.qty), rate: flt(item.rate), amount: flt(item.amount) };
 			added++;
 		}
+	});
+
+	// Réécrire tous les articles dans le tableau
+	Object.values(snapshot).forEach(item => {
+		const row = frm.add_child("items");
+		row.description = item.description;
+		row.qty         = item.qty;
+		row.rate        = item.rate;
+		row.amount      = item.amount;
 	});
 
 	frm.refresh_field("items");
