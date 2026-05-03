@@ -164,28 +164,33 @@ def _parse_bl_table(table, merged, skipped, file_name):
 		pu_raw  = str(row[idx_pu]  or "").strip()
 
 		# Ignorer lignes vides ou totaux
-		if not ref or not desc or ref.lower() in ("réf", "ref", "total", ""):
+		if ref.lower() in ("réf", "ref", "total"):
 			continue
-		# Ignorer si ref non numérique (ligne de total, etc.)
-		if not any(c.isdigit() for c in ref):
+		if not desc:
 			continue
+
+		# Si ref non numérique ou vide → utiliser la description comme clé (ex: article sans code dans le PDF)
+		if not ref or not any(c.isdigit() for c in ref):
+			merge_key = f"__desc__{desc}"
+		else:
+			merge_key = ref
 
 		try:
 			qty = float(qty_raw.replace(" ", "").replace(",", "."))
 			pu  = float(pu_raw.replace(" ", "").replace(",", "."))
 		except ValueError:
-			skipped.append({"file": file_name, "reason": f"ligne {ref} : quantité ou prix non numérique"})
+			skipped.append({"file": file_name, "reason": f"ligne '{desc}' : quantité ou prix non numérique"})
 			continue
 
 		if qty <= 0 or pu < 0:
 			continue
 
-		if ref in merged:
+		if merge_key in merged:
 			# Fusion : somme qty + prix pondéré
-			merged[ref]["weighted_sum"] += qty * pu
-			merged[ref]["qty"] += qty
+			merged[merge_key]["weighted_sum"] += qty * pu
+			merged[merge_key]["qty"] += qty
 		else:
-			merged[ref] = {
+			merged[merge_key] = {
 				"description": desc,
 				"qty": qty,
 				"weighted_sum": qty * pu,

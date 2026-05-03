@@ -1,3 +1,8 @@
+## [0.0.2] - 2026-05-03
+
+### Corrigé
+- **Import BL PDF** : les articles sans référence dans le PDF (colonne Réf vide) étaient ignorés silencieusement. Ils sont désormais inclus en utilisant la désignation comme clé interne de déduplication.
+
 ## [0.0.1] - 2026-03-28
 
 ### Ajouté
