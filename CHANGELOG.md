@@ -1,3 +1,8 @@
+## [0.0.3] - 2026-05-03
+
+### Corrigé
+- **Import BL PDF** : une ligne vide (ligne vide par défaut de Frappe) apparaissait en tête du tableau après import. Elle est désormais supprimée avant la fusion des articles.
+
 ## [0.0.2] - 2026-05-03
 
 ### Corrigé

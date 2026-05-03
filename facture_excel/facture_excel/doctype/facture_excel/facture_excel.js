@@ -192,6 +192,9 @@ function _pick_and_import_pdf(frm) {
 }
 
 function _apply_import_pdf(frm, result) {
+	// Supprimer les lignes vides (ligne vide par défaut de Frappe)
+	frm.doc.items = (frm.doc.items || []).filter(r => (r.description || "").trim());
+
 	// Fusionner avec les articles existants (par description normalisée)
 	const normalize = s => s.toLowerCase().trim().replace(/\s+/g, " ");
 
