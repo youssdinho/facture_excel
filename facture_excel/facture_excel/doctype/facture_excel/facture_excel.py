@@ -36,7 +36,7 @@ class FactureExcel(Document):
 			frappe.throw("Impossible de valider : la Facture ERPNext liée n'a pas de total.")
 
 		diff = abs((self.total_commercial or 0) - self.grand_total)
-		if diff > 0.009:
+		if diff > 0.000009:
 			frappe.throw(
 				f"Le total commercial ({frappe.format(self.total_commercial, {'fieldtype': 'Currency'})}) "
 				f"doit être égal au total de la Facture ERPNext "
@@ -121,12 +121,12 @@ def import_pdf_bl(files_data):
 	items = []
 	for ref, data in merged.items():
 		qty = data["qty"]
-		rate = round(data["weighted_sum"] / qty, 2) if qty else 0
+		rate = round(data["weighted_sum"] / qty, 5) if qty else 0
 		items.append({
 			"description": data["description"],
 			"qty": qty,
 			"rate": rate,
-			"amount": round(qty * rate, 2),
+			"amount": round(qty * rate, 5),
 		})
 
 	return {
@@ -295,7 +295,7 @@ def import_excel(docname, file_data, file_name):
 			"description": str(desc).strip(),
 			"qty":         qty_val,
 			"rate":        rate_val,
-			"amount":      round(qty_val * rate_val, 2),
+			"amount":      round(qty_val * rate_val, 5),
 		})
 
 	return {"items": items, "imported": len(items), "skipped": skipped}

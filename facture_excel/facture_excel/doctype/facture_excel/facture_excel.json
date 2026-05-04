@@ -49,6 +49,7 @@
    "fieldname": "grand_total",
    "fieldtype": "Currency",
    "label": "Total Facture ERPNext",
+   "precision": "5",
    "read_only": 1
   },
   {
@@ -73,6 +74,7 @@
    "fieldtype": "Currency",
    "in_list_view": 1,
    "label": "Total Commercial",
+   "precision": "5",
    "read_only": 1
   },
   {

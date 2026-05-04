@@ -1,3 +1,10 @@
+## [0.0.4] - 2026-05-04
+
+### Modifié
+- **Prix** : précision des champs prix (Prix Unitaire, Montant, Total Commercial, Total ERPNext) passée de 2 à 5 chiffres après la virgule
+- **Calculs** : arrondis internes (import PDF BL et import Excel) mis à jour à 5 décimales
+- **Validation** : tolérance d'écart entre total commercial et total ERPNext ajustée à 0,000009
+
 ## [0.0.3] - 2026-05-03
 
 ### Corrigé

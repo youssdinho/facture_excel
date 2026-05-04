@@ -32,6 +32,7 @@
    "fieldname": "rate",
    "fieldtype": "Currency",
    "label": "Prix Unitaire",
+   "precision": "5",
    "reqd": 1,
    "in_list_view": 1,
    "columns": 2
@@ -40,6 +41,7 @@
    "fieldname": "amount",
    "fieldtype": "Currency",
    "label": "Montant",
+   "precision": "5",
    "read_only": 1,
    "in_list_view": 1,
    "columns": 2
