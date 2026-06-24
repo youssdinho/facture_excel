@@ -1,3 +1,20 @@
+## [0.0.5] - 2026-06-24
+
+### Ajouté
+- **Import BL PDF groupé** : nouveau mode d'import qui conserve chaque Bon de Livraison séparé (n° + date) au lieu de fusionner tous les articles
+  - Champs `bl_no` / `bl_date` sur les lignes de Facture Excel
+  - Extraction du n° de BL et de la date depuis l'en-tête du PDF
+  - Articles reproduits ligne par ligne, sans déduplication entre BL
+  - Prix unitaire recalculé depuis le montant ligne (M.TTC) car la colonne PU du PDF est tronquée à l'extraction
+  - Remplace tous les articles existants à l'import
+  - Print format : affichage groupé avec une ligne d'en-tête par BL
+- Le mode **« BL PDF (fusionné) »** existant est conservé
+
+### Corrigé
+- **Print format** : le Sous-total HT et la TVA étaient repris de la facture ERPNext liée et ne correspondaient pas au Total TTC commercial. Ils sont désormais calculés à partir du TTC commercial réel (taux de TVA déduit de la facture ERPNext, 20 % par défaut)
+- **Print format** : suppression du fond noir sur l'en-tête de BL (économie d'encre), remplacé par un filet et une barre latérale
+- **Dialogue d'import** : lien « Télécharger le modèle » déplacé dans la section Excel ; couleurs des boutons d'import harmonisées (seul « BL PDF (fusionné) » mis en avant)
+
 ## [0.0.4] - 2026-05-04
 
 ### Modifié

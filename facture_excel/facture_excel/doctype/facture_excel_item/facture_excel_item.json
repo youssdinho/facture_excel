@@ -6,12 +6,25 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "bl_no",
+  "bl_date",
   "description",
   "qty",
   "rate",
   "amount"
  ],
  "fields": [
+  {
+   "fieldname": "bl_no",
+   "fieldtype": "Data",
+   "label": "N° BL",
+   "description": "Renseigné automatiquement lors de l'import groupé par BL"
+  },
+  {
+   "fieldname": "bl_date",
+   "fieldtype": "Data",
+   "label": "Date BL"
+  },
   {
    "fieldname": "description",
    "fieldtype": "Small Text",

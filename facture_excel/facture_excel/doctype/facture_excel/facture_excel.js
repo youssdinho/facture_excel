@@ -81,7 +81,8 @@ function _show_import_dialog(frm) {
 					<b style="font-size:12px;">📄 Depuis un fichier Excel (.xlsx)</b>
 					<div style="color:#555;line-height:1.6;margin-top:4px;">
 						Les colonnes doivent contenir : <b>Désignation</b>, <b>Quantité</b> et <b>Prix Unitaire</b>.<br>
-						<span style="color:#e74c3c;">⚠ L'import Excel remplace tous les articles existants.</span>
+						<span style="color:#e74c3c;">⚠ L'import Excel remplace tous les articles existants.</span><br>
+						<a href="#" id="fe-dl-modele" style="font-size:11px;display:inline-block;margin-top:6px;">⬇ Télécharger le modèle Excel</a>
 					</div>
 				</div>`,
 			},
@@ -91,30 +92,38 @@ function _show_import_dialog(frm) {
 				options: `<div style="margin-bottom:8px;border-top:1px solid #eee;padding-top:14px;">
 					<b style="font-size:12px;">📦 Depuis un ou plusieurs Bons de Livraison (PDF)</b>
 					<div style="color:#555;line-height:1.6;margin-top:4px;">
-						Les articles sont <b>fusionnés</b> avec ceux déjà présents.<br>
-						Les doublons sont détectés par code article : quantités sommées, prix pondéré calculé.
+						<b>BL PDF (fusionné)</b> : doublons regroupés par code article (qté sommées, prix pondéré), fusionnés avec les articles déjà présents.<br>
+						<b>BL PDF (groupé)</b> : chaque BL reste séparé avec son n° et sa date, articles reproduits ligne par ligne. <span style="color:#e74c3c;">Remplace tous les articles existants.</span>
 					</div>
 				</div>`,
 			},
 		],
-		primary_action_label: __("Importer Excel"),
+		primary_action_label: __("BL PDF (fusionné)"),
 		primary_action() {
-			d.hide();
-			_pick_and_import(frm);
-		},
-		secondary_action_label: __("Importer BL PDF"),
-		secondary_action() {
 			d.hide();
 			_pick_and_import_pdf(frm);
 		},
+		secondary_action_label: __("Importer Excel"),
+		secondary_action() {
+			d.hide();
+			_pick_and_import(frm);
+		},
 	});
-	// Ajouter bouton modèle manuellement
-	d.$wrapper.find(".modal-footer").prepend(
-		`<button class="btn btn-default btn-sm" id="btn-dl-modele" style="margin-right:auto;">
-			Télécharger le modèle Excel
+	// Lien de téléchargement du modèle (placé dans la section Excel)
+	d.$wrapper.find("#fe-dl-modele").on("click", (e) => {
+		e.preventDefault();
+		_download_template();
+	});
+	// Bouton import groupé par BL — gris (btn-default), seul "fusionné" reste noir
+	d.$wrapper.find(".modal-footer .btn-modal-secondary").after(
+		`<button class="btn btn-default btn-sm" id="btn-import-pdf-grouped" style="margin-left:8px;">
+			BL PDF (groupé)
 		</button>`
 	);
-	d.$wrapper.find("#btn-dl-modele").on("click", () => _download_template());
+	d.$wrapper.find("#btn-import-pdf-grouped").on("click", () => {
+		d.hide();
+		_pick_and_import_pdf_grouped(frm);
+	});
 	d.show();
 }
 
@@ -249,6 +258,79 @@ function _apply_import_pdf(frm, result) {
 	}
 	frappe.msgprint({
 		title: __("Résultat de l'import BL"),
+		message: msg,
+		indicator: result.skipped && result.skipped.length > 0 ? "orange" : "green",
+	});
+}
+
+function _pick_and_import_pdf_grouped(frm) {
+	const input = document.createElement("input");
+	input.type = "file";
+	input.accept = ".pdf";
+	input.multiple = true;
+	input.onchange = function () {
+		const files = Array.from(input.files);
+		if (!files.length) return;
+
+		const invalid = files.filter(f => !f.name.toLowerCase().endsWith(".pdf"));
+		if (invalid.length) {
+			frappe.msgprint({ message: __("Seuls les fichiers .pdf sont acceptés."), indicator: "red" });
+			return;
+		}
+
+		const readers = files.map(file => new Promise(resolve => {
+			const reader = new FileReader();
+			reader.onload = e => resolve({
+				file_name: file.name,
+				file_data: e.target.result.split(",")[1],
+			});
+			reader.readAsDataURL(file);
+		}));
+
+		Promise.all(readers).then(files_data => {
+			frappe.call({
+				method: "facture_excel.facture_excel.doctype.facture_excel.facture_excel.import_pdf_bl_grouped",
+				args: { files_data: JSON.stringify(files_data) },
+				freeze: true,
+				freeze_message: __("Extraction des BL en cours…"),
+				callback(r) {
+					if (!r.exc && r.message) {
+						_apply_import_pdf_grouped(frm, r.message);
+					}
+				},
+			});
+		});
+	};
+	input.click();
+}
+
+function _apply_import_pdf_grouped(frm, result) {
+	// Mode groupé : on remplace tout, en conservant l'ordre et le groupement par BL
+	frm.clear_table("items");
+
+	(result.items || []).forEach(item => {
+		const row = frm.add_child("items");
+		row.bl_no       = item.bl_no || "";
+		row.bl_date     = item.bl_date || "";
+		row.description = item.description;
+		row.qty         = flt(item.qty);
+		row.rate        = flt(item.rate);
+		row.amount      = flt(item.amount);
+	});
+
+	frm.refresh_field("items");
+	_calc_total(frm);
+
+	let msg = `<b>${result.bls}</b> BL importé(s) — <b>${result.imported}</b> article(s), groupés par BL.`;
+	if (result.skipped && result.skipped.length > 0) {
+		msg += `<br><br><b>${result.skipped.length}</b> problème(s) :<ul>`;
+		result.skipped.forEach(s => {
+			msg += `<li>${s.file ? s.file + " : " : ""}${s.reason}</li>`;
+		});
+		msg += "</ul>";
+	}
+	frappe.msgprint({
+		title: __("Résultat de l'import BL groupé"),
 		message: msg,
 		indicator: result.skipped && result.skipped.length > 0 ? "orange" : "green",
 	});

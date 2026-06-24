@@ -137,6 +137,161 @@ def import_pdf_bl(files_data):
 	}
 
 
+@frappe.whitelist()
+def import_pdf_bl_grouped(files_data):
+	"""Parse un ou plusieurs BL PDF en conservant le groupement par BL.
+
+	Contrairement à import_pdf_bl, aucune fusion entre BL : chaque ligne garde
+	son numéro de BL et sa date. Les lignes sont retournées dans l'ordre des BL,
+	chacune portant bl_no / bl_date pour permettre un affichage groupé.
+	files_data : liste JSON de {file_name, file_data (base64)}
+	"""
+	import json
+	import pdfplumber
+
+	if isinstance(files_data, str):
+		files_data = json.loads(files_data)
+
+	all_items = []
+	skipped = []
+	bl_count = 0
+
+	for file_obj in files_data:
+		file_name = file_obj.get("file_name", "")
+		if not file_name.lower().endswith(".pdf"):
+			skipped.append({"file": file_name, "reason": "pas un fichier PDF"})
+			continue
+
+		try:
+			raw = base64.b64decode(file_obj["file_data"])
+		except Exception:
+			skipped.append({"file": file_name, "reason": "impossible de décoder le fichier"})
+			continue
+
+		try:
+			with pdfplumber.open(io.BytesIO(raw)) as pdf:
+				full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+				bl_no, bl_date = _extract_bl_header(full_text, file_name)
+
+				lines = []
+				for page in pdf.pages:
+					for table in page.extract_tables():
+						_parse_bl_table_grouped(table, lines, skipped, file_name)
+		except Exception as e:
+			skipped.append({"file": file_name, "reason": f"erreur lecture PDF : {e}"})
+			continue
+
+		if not lines:
+			skipped.append({"file": file_name, "reason": "aucune ligne article détectée"})
+			continue
+
+		bl_count += 1
+		for ln in lines:
+			ln["bl_no"] = bl_no
+			ln["bl_date"] = bl_date
+			all_items.append(ln)
+
+	return {
+		"items": all_items,
+		"imported": len(all_items),
+		"bls": bl_count,
+		"files": len(files_data),
+		"skipped": skipped,
+	}
+
+
+def _extract_bl_header(text, file_name):
+	"""Extrait (numéro_bl, date) depuis le texte d'un BL OMAG.
+
+	Format attendu : 'LIVRAISON : 2029059633 Le 28/03/2026 13:52'.
+	Fallback sur les chiffres du nom de fichier si le motif est absent.
+	"""
+	import re
+
+	m = re.search(
+		r"LIVRAISON\s*:?\s*(\d+)\s+Le\s+(\d{1,2}/\d{1,2}/\d{4})",
+		text or "",
+		re.IGNORECASE,
+	)
+	if m:
+		return m.group(1).strip(), m.group(2).strip()
+
+	# Fallback : numéro depuis le nom de fichier, date introuvable
+	digits = re.search(r"(\d{6,})", file_name or "")
+	bl_no = digits.group(1) if digits else (file_name or "BL")
+	return bl_no, ""
+
+
+def _parse_bl_table_grouped(table, lines, skipped, file_name):
+	"""Extrait les lignes articles d'un tableau pdfplumber SANS fusion.
+
+	Le prix unitaire est recalculé à partir du montant ligne (M.TTC), fiable,
+	plutôt que de la colonne PU TTC qui est tronquée à l'extraction.
+	"""
+	if not table or len(table) < 2:
+		return
+
+	header = [str(c).strip().lower().replace("\n", " ") if c else "" for c in table[0]]
+
+	idx_ref    = _find_col(header, {"réf", "ref", "référence", "code"})
+	idx_desc   = _find_col(header, {"description", "désignation", "libellé", "article"})
+	idx_qty    = _find_col(header, {"qté", "qty", "quantité", "qte"})
+	idx_amount = _find_col(header, {"m.ttc", "mttc", "m ttc", "montant ttc", "montant", "total ttc"})
+	idx_pu     = _find_col(header, {"pu ttc", "pu", "prix unitaire", "prix unit.", "p.u ttc"})
+
+	if any(i is None for i in [idx_desc, idx_qty]) or (idx_amount is None and idx_pu is None):
+		skipped.append({"file": file_name, "reason": f"colonnes introuvables : {header}"})
+		return
+
+	max_idx = max(i for i in [idx_ref, idx_desc, idx_qty, idx_amount, idx_pu] if i is not None)
+
+	for row in table[1:]:
+		if not row or len(row) <= max_idx:
+			continue
+
+		desc = str(row[idx_desc] or "").strip().replace("\n", " ")
+		qty_raw = str(row[idx_qty] or "").strip()
+
+		# Ignorer lignes vides ou totaux
+		if not desc or desc.lower() in ("description", "désignation", "total"):
+			continue
+
+		try:
+			qty = float(qty_raw.replace(" ", "").replace(",", "."))
+		except ValueError:
+			skipped.append({"file": file_name, "reason": f"ligne '{desc}' : quantité non numérique"})
+			continue
+
+		if qty <= 0:
+			continue
+
+		# Montant ligne fiable → prix unitaire = montant / qté
+		amount = None
+		if idx_amount is not None:
+			try:
+				amount = float(str(row[idx_amount] or "").strip().replace(" ", "").replace(",", "."))
+			except ValueError:
+				amount = None
+
+		if amount is not None and amount > 0:
+			rate = round(amount / qty, 5)
+		else:
+			# Fallback sur la colonne PU TTC (tronquée mais mieux que rien)
+			try:
+				rate = float(str(row[idx_pu] or "").strip().replace(" ", "").replace(",", "."))
+			except (ValueError, TypeError):
+				skipped.append({"file": file_name, "reason": f"ligne '{desc}' : montant et prix illisibles"})
+				continue
+			amount = round(qty * rate, 5)
+
+		lines.append({
+			"description": desc,
+			"qty": qty,
+			"rate": rate,
+			"amount": round(amount, 5),
+		})
+
+
 def _parse_bl_table(table, merged, skipped, file_name):
 	"""Extrait les lignes articles d'un tableau pdfplumber et les fusionne dans merged."""
 	if not table or len(table) < 2:
