@@ -110,10 +110,16 @@ def import_pdf_bl(files_data):
 
 		try:
 			with pdfplumber.open(io.BytesIO(raw)) as pdf:
-				for page in pdf.pages:
-					tables = page.extract_tables()
-					for table in tables:
-						_parse_bl_table(table, merged, skipped, file_name)
+				# Format AMANATEM : colonnes repérées par coordonnées X
+				lines, v2_ok = _parse_bl_pages_v2(pdf, skipped, file_name)
+				if v2_ok:
+					_merge_v2_lines(lines, merged)
+				else:
+					# Repli sur l'ancien format OMAG (tableaux à filets)
+					for page in pdf.pages:
+						tables = page.extract_tables()
+						for table in tables:
+							_parse_bl_table(table, merged, skipped, file_name)
 		except Exception as e:
 			skipped.append({"file": file_name, "reason": f"erreur lecture PDF : {e}"})
 
@@ -173,10 +179,14 @@ def import_pdf_bl_grouped(files_data):
 				full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
 				bl_no, bl_date = _extract_bl_header(full_text, file_name)
 
-				lines = []
-				for page in pdf.pages:
-					for table in page.extract_tables():
-						_parse_bl_table_grouped(table, lines, skipped, file_name)
+				# Format AMANATEM : colonnes repérées par coordonnées X
+				lines, v2_ok = _parse_bl_pages_v2(pdf, skipped, file_name)
+
+				# Repli sur l'ancien format OMAG (tableaux à filets)
+				if not v2_ok:
+					for page in pdf.pages:
+						for table in page.extract_tables():
+							_parse_bl_table_grouped(table, lines, skipped, file_name)
 		except Exception as e:
 			skipped.append({"file": file_name, "reason": f"erreur lecture PDF : {e}"})
 			continue
@@ -201,13 +211,25 @@ def import_pdf_bl_grouped(files_data):
 
 
 def _extract_bl_header(text, file_name):
-	"""Extrait (numéro_bl, date) depuis le texte d'un BL OMAG.
+	"""Extrait (numéro_bl, date) depuis le texte d'un BL.
 
-	Format attendu : 'LIVRAISON : 2029059633 Le 28/03/2026 13:52'.
-	Fallback sur les chiffres du nom de fichier si le motif est absent.
+	Format AMANATEM : 'Bon de Livraison 22-08-2026 26018716' (date puis numéro).
+	Format OMAG (ancien) : 'LIVRAISON : 2029059633 Le 28/03/2026 13:52'.
+	Fallback sur les chiffres du nom de fichier si aucun motif ne correspond.
 	"""
 	import re
 
+	# Format AMANATEM : la date précède le numéro de pièce, séparateurs '-'
+	m = re.search(
+		r"Bon\s+de\s+Livraison\s+(\d{1,2}[-/]\d{1,2}[-/]\d{4})\s+(\d+)",
+		text or "",
+		re.IGNORECASE,
+	)
+	if m:
+		# Date normalisée en jj/mm/aaaa pour rester homogène avec l'ancien format
+		return m.group(2).strip(), m.group(1).strip().replace("-", "/")
+
+	# Format OMAG (ancien)
 	m = re.search(
 		r"LIVRAISON\s*:?\s*(\d+)\s+Le\s+(\d{1,2}/\d{1,2}/\d{4})",
 		text or "",
@@ -220,6 +242,168 @@ def _extract_bl_header(text, file_name):
 	digits = re.search(r"(\d{6,})", file_name or "")
 	bl_no = digits.group(1) if digits else (file_name or "BL")
 	return bl_no, ""
+
+
+# --- Format AMANATEM -----------------------------------------------------------
+# Ces BL n'ont pas de filets de tableau : pdfplumber.extract_tables() renvoie une
+# colonne fourre-tout. Les colonnes sont en revanche parfaitement alignées, on les
+# reconstruit donc à partir des abscisses de la ligne d'en-tête.
+
+_BL_V2_HEADERS = (
+	("no",          {"n°", "no", "n"}),
+	("code",        {"code"}),
+	("description", {"designation"}),
+	("depot",       {"depot"}),
+	("qty",         {"qte", "qty"}),
+	("rate",        {"prix"}),
+	("amount",      {"montant"}),
+)
+
+# Marge (en points) retranchée à l'abscisse d'un en-tête pour poser la frontière de
+# colonne : les valeurs numériques sont alignées à droite et peuvent commencer un
+# peu à gauche de leur en-tête.
+_BL_V2_MARGIN = 6
+
+
+def _bl_v2_rows(page, tol=3):
+	"""Regroupe les mots d'une page en lignes visuelles, de haut en bas."""
+	rows = []
+	for w in sorted(page.extract_words(), key=lambda w: (w["top"], w["x0"])):
+		if rows and abs(w["top"] - rows[-1][0]) <= tol:
+			rows[-1][1].append(w)
+		else:
+			rows.append((w["top"], [w]))
+	return [sorted(ws, key=lambda w: w["x0"]) for _, ws in rows]
+
+
+def _bl_v2_cuts(rows):
+	"""Repère la ligne d'en-tête et en déduit les bornes X de chaque colonne.
+
+	Retourne (index_ligne_entete, [(champ, x_min, x_max)]) ou (None, None) si la
+	page n'est pas au format AMANATEM.
+	"""
+	for i, row in enumerate(rows):
+		found = {}
+		for w in row:
+			norm = _normalize(w["text"])
+			for field, aliases in _BL_V2_HEADERS:
+				if field not in found and norm in aliases:
+					found[field] = w["x0"]
+					break
+
+		# Signature minimale du format : ces trois colonnes lui sont propres
+		if not {"description", "depot", "qty"} <= set(found):
+			continue
+
+		ordered = sorted(found.items(), key=lambda t: t[1])
+		cuts = []
+		for j, (field, x0) in enumerate(ordered):
+			x_min = float("-inf") if j == 0 else x0 - _BL_V2_MARGIN
+			x_max = float("inf") if j == len(ordered) - 1 else ordered[j + 1][1] - _BL_V2_MARGIN
+			cuts.append((field, x_min, x_max))
+		return i, cuts
+
+	return None, None
+
+
+def _bl_v2_num(raw):
+	"""Convertit '1 234,50' ou '8,00' en float. Retourne None si illisible."""
+	if not raw:
+		return None
+	txt = str(raw)
+	for ch in ("\u00a0", "\u202f", " "):
+		txt = txt.replace(ch, "")
+	try:
+		return float(txt.replace(",", "."))
+	except ValueError:
+		return None
+
+
+def _parse_bl_pages_v2(pdf, skipped, file_name):
+	"""Parse un BL au format AMANATEM via les coordonnées X des mots.
+
+	Retourne (lignes, format_reconnu). Si le format n'est pas reconnu, retourne
+	([], False) sans rien signaler dans skipped : l'appelant se replie alors sur
+	l'ancien parseur OMAG.
+	"""
+	lines = []
+	recognized = False
+
+	for page in pdf.pages:
+		rows = _bl_v2_rows(page)
+		header_idx, cuts = _bl_v2_cuts(rows)
+		if header_idx is None:
+			continue
+		recognized = True
+
+		for row in rows[header_idx + 1:]:
+			cells = {field: [] for field, _, _ in cuts}
+			for w in row:
+				center = (w["x0"] + w["x1"]) / 2
+				for field, x_min, x_max in cuts:
+					if x_min <= center < x_max:
+						cells[field].append(w["text"])
+						break
+
+			joined = {f: " ".join(v).strip() for f, v in cells.items()}
+			desc = joined.get("description", "")
+
+			# Ligne de total : fin du tableau pour cette page
+			if "total" in (_normalize(joined.get("depot")), _normalize(desc)):
+				break
+
+			qty = _bl_v2_num(joined.get("qty"))
+			amount = _bl_v2_num(joined.get("amount"))
+			rate = _bl_v2_num(joined.get("rate"))
+
+			# Ligne de continuation : désignation qui déborde sur la ligne suivante
+			if qty is None and amount is None:
+				if desc and lines:
+					lines[-1]["description"] = f"{lines[-1]['description']} {desc}".strip()
+				continue
+
+			if not desc:
+				continue
+
+			if qty is None or qty <= 0:
+				skipped.append({"file": file_name, "reason": f"ligne '{desc}' : quantité non numérique"})
+				continue
+
+			# Le montant ligne est la source la plus fiable pour le prix unitaire
+			if amount is not None and amount > 0:
+				rate = round(amount / qty, 5)
+			elif rate is not None:
+				amount = round(qty * rate, 5)
+			else:
+				skipped.append({"file": file_name, "reason": f"ligne '{desc}' : montant et prix illisibles"})
+				continue
+
+			lines.append({
+				"description": desc,
+				"qty": qty,
+				"rate": rate,
+				"amount": round(amount, 5),
+			})
+
+	return lines, recognized
+
+
+def _merge_v2_lines(lines, merged):
+	"""Fusionne des lignes AMANATEM dans l'accumulateur de import_pdf_bl.
+
+	Clé de fusion : la désignation, comme pour les articles sans code côté OMAG.
+	"""
+	for ln in lines:
+		key = f"__desc__{ln['description']}"
+		if key in merged:
+			merged[key]["qty"] += ln["qty"]
+			merged[key]["weighted_sum"] += ln["qty"] * ln["rate"]
+		else:
+			merged[key] = {
+				"description": ln["description"],
+				"qty": ln["qty"],
+				"weighted_sum": ln["qty"] * ln["rate"],
+			}
 
 
 def _parse_bl_table_grouped(table, lines, skipped, file_name):
