@@ -1,5 +1,6 @@
 import base64
 import io
+import re
 import unicodedata
 
 import frappe
@@ -307,14 +308,24 @@ def _bl_v2_cuts(rows):
 
 
 def _bl_v2_num(raw):
-	"""Convertit '1 234,50' ou '8,00' en float. Retourne None si illisible."""
+	"""Convertit un nombre au format français en float. None si illisible.
+
+	Les BL emploient indifféremment l'espace ou le point comme séparateur de
+	milliers ('1 234,50', '4.500,00') et toujours la virgule comme décimale.
+	"""
 	if not raw:
 		return None
-	txt = str(raw)
+	txt = str(raw).strip()
 	for ch in ("\u00a0", "\u202f", " "):
 		txt = txt.replace(ch, "")
+	if "," in txt:
+		# La virgule est la décimale : tout point restant est un séparateur de milliers
+		txt = txt.replace(".", "").replace(",", ".")
+	elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", txt):
+		# Entier sans décimale : '4.500' vaut 4500, pas 4.5
+		txt = txt.replace(".", "")
 	try:
-		return float(txt.replace(",", "."))
+		return float(txt)
 	except ValueError:
 		return None
 
@@ -440,9 +451,8 @@ def _parse_bl_table_grouped(table, lines, skipped, file_name):
 		if not desc or desc.lower() in ("description", "désignation", "total"):
 			continue
 
-		try:
-			qty = float(qty_raw.replace(" ", "").replace(",", "."))
-		except ValueError:
+		qty = _bl_v2_num(qty_raw)
+		if qty is None:
 			skipped.append({"file": file_name, "reason": f"ligne '{desc}' : quantité non numérique"})
 			continue
 
@@ -452,18 +462,14 @@ def _parse_bl_table_grouped(table, lines, skipped, file_name):
 		# Montant ligne fiable → prix unitaire = montant / qté
 		amount = None
 		if idx_amount is not None:
-			try:
-				amount = float(str(row[idx_amount] or "").strip().replace(" ", "").replace(",", "."))
-			except ValueError:
-				amount = None
+			amount = _bl_v2_num(str(row[idx_amount] or "").strip())
 
 		if amount is not None and amount > 0:
 			rate = round(amount / qty, 5)
 		else:
 			# Fallback sur la colonne PU TTC (tronquée mais mieux que rien)
-			try:
-				rate = float(str(row[idx_pu] or "").strip().replace(" ", "").replace(",", "."))
-			except (ValueError, TypeError):
+			rate = _bl_v2_num(str(row[idx_pu] or "").strip())
+			if rate is None:
 				skipped.append({"file": file_name, "reason": f"ligne '{desc}' : montant et prix illisibles"})
 				continue
 			amount = round(qty * rate, 5)
@@ -514,10 +520,9 @@ def _parse_bl_table(table, merged, skipped, file_name):
 		else:
 			merge_key = ref
 
-		try:
-			qty = float(qty_raw.replace(" ", "").replace(",", "."))
-			pu  = float(pu_raw.replace(" ", "").replace(",", "."))
-		except ValueError:
+		qty = _bl_v2_num(qty_raw)
+		pu  = _bl_v2_num(pu_raw)
+		if qty is None or pu is None:
 			skipped.append({"file": file_name, "reason": f"ligne '{desc}' : quantité ou prix non numérique"})
 			continue
 
